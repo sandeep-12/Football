@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Penalty Shootout ⚽</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0a1628;color:#fff;min-height:100vh;overflow:hidden;user-select:none}
+canvas{display:block;width:100vw;height:100vh;position:fixed;top:0;left:0}
+
+/* HUD */
+.hud{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:flex-start;padding:12px 16px;z-index:10;pointer-events:none}
+.hud-left,.hud-right{background:rgba(0,0,0,.55);backdrop-filter:blur(8px);border-radius:12px;padding:10px 16px}
+.hud-left .shots{font-size:.7em;color:#aaa;margin-bottom:2px}
+.hud-left .score{font-size:1.4em;font-weight:800}
+.hud-right{text-align:right}
+.hud-right .label{font-size:.6em;color:#aaa;text-transform:uppercase;letter-spacing:1px}
+.hud-right .best{font-size:1.1em;font-weight:700;color:#ffd54f}
+
+/* Shot indicators */
+.shot-dots{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);display:flex;gap:8px;z-index:10;pointer-events:none}
+.dot{width:14px;height:14px;border-radius:50%;border:2px solid #fff4;background:transparent;transition:all .3s}
+.dot.goal{background:#4caf50;border-color:#4caf50;box-shadow:0 0 8px #4caf50}
+.dot.miss{background:#f44336;border-color:#f44336;box-shadow:0 0 8px #f44336}
+.dot.current{border-color:#fff;box-shadow:0 0 8px #fff4}
+
+/* Messages */
+.flash{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%) scale(0);z-index:20;pointer-events:none;text-align:center;transition:transform .2s cubic-bezier(.17,.67,.26,1.4),opacity .3s}
+.flash.show{transform:translate(-50%,-50%) scale(1)}
+.flash.hide{transform:translate(-50%,-50%) scale(0.8);opacity:0}
+.flash h1{font-size:3em;font-weight:900;text-shadow:0 4px 20px rgba(0,0,0,.6)}
+.flash p{font-size:1.1em;color:#ddd;margin-top:4px}
+
+/* End screen */
+.end-screen{position:fixed;inset:0;background:rgba(5,10,25,.92);backdrop-filter:blur(12px);z-index:30;display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center}
+.end-screen.show{display:flex}
+.end-screen .emoji{font-size:4em;margin-bottom:8px}
+.end-screen h2{font-size:2em;font-weight:800}
+.end-screen .result{font-size:1.4em;color:#ffd54f;font-weight:600}
+.end-screen .stats{font-size:.8em;color:#999;margin-top:8px}
+.end-screen .stats span{color:#ddd}
+.play-btn{margin-top:20px;padding:14px 40px;border:none;border-radius:12px;background:#1565c0;color:#fff;font-size:1.1em;font-weight:700;cursor:pointer;transition:transform .1s,background .15s}
+.play-btn:hover{background:#1976d2;transform:scale(1.03)}
+.play-btn:active{transform:scale(0.97)}
+
+/* Aim instruction */
+.aim-hint{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);font-size:.75em;color:#ffffff66;z-index:10;pointer-events:none;transition:opacity .3s}
+.aim-hint.hide{opacity:0}
+
+/* Power bar */
+.power-wrap{position:fixed;right:16px;top:50%;transform:translateY(-50%);width:16px;height:160px;background:rgba(0,0,0,.4);border-radius:8px;z-index:10;overflow:hidden;display:none;border:1px solid #fff2}
+.power-wrap.show{display:block}
+.power-fill{position:absolute;bottom:0;left:0;right:0;background:#4caf50;border-radius:6px;transition:height .05s}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hud">
+  <div class="hud-left"><div class="shots" id="hud-shots">SHOT 1 OF 5</div><div class="score" id="hud-score">0</div></div>
+  <div class="hud-right"><div class="label">Personal Best</div><div class="best" id="hud-best">0</div></div>
+</div>
+<div class="shot-dots" id="dots"></div>
+<div class="flash" id="flash"><h1 id="flash-title"></h1><p id="flash-sub"></p></div>
+<div class="end-screen" id="endscreen">
+  <div class="emoji" id="end-emoji">🏆</div>
+  <h2 id="end-title">Incredible!</h2>
+  <div class="result" id="end-result">5 / 5</div>
+  <div class="stats" id="end-stats"></div>
+  <button class="play-btn" onclick="startGame()">Play Again</button>
+</div>
+<div class="aim-hint" id="aim-hint">👆 Tap anywhere on the goal to shoot</div>
+<script>
+// ====== CANVAS SETUP ======
+const C=document.getElementById('c'),X=C.getContext('2d');
+let W,H,dpr;
+function resize(){
+  dpr=window.devicePixelRatio||1;
+  W=window.innerWidth;H=window.innerHeight;
+  C.width=W*dpr;C.height=H*dpr;
+  X.setTransform(dpr,0,0,dpr,0,0);
+}
+window.addEventListener('resize',()=>{resize();render();});
+resize();
+
+// ====== GAME STATE ======
+const TOTAL=5;
+let shot=0,goals=0,results=[],state='aim'; // aim, power, fly, result, done
+let aimX=0.5,aimY=0.5; // 0-1 within goal
+let gkDive=0,gkDiveT=0;
+let ballT=0,ballStart,ballEnd;
+let flashTimeout;
+
+// ====== FIELD GEOMETRY (responsive) ======
+function geo(){
+  const gw=W*0.52,gh=H*0.28;
+  const gx=(W-gw)/2,gy=H*0.12;
+  const ballY=H*0.82;
+  return{gx,gy,gw,gh,ballX:W/2,ballY,cx:W/2,cy:gy+gh/2};
+}
+
+// ====== RENDERING ======
+function render(){
+  const g=geo();
+  // Sky gradient (solid color as user prefers)
+  X.fillStyle='#1a3a5c';X.fillRect(0,0,W,H*0.45);
+  // Stadium lights
+  drawLights(g);
+  // Crowd
+  drawCrowd(g);
+  // Grass
+  X.fillStyle='#2e7d32';X.fillRect(0,H*0.38,W,H*0.62);
+  drawGrassStripes(g);
+  // Goal structure
+  drawGoal(g);
+  // Goalkeeper
+  drawKeeper(g);
+  // Ball
+  drawBall(g);
+  // Aim reticle
+  if(state==='aim')drawReticle(g);
+}
+
+function drawLights(g){
+  // Stadium floodlights
+  for(let i=0;i<4;i++){
+    const x=W*0.1+i*(W*0.27);
+    X.fillStyle='#334455';X.fillRect(x,0,3,H*0.15);
+    X.fillStyle='#ffd54f';X.globalAlpha=0.6;
+    X.beginPath();X.arc(x+1.5,H*0.02,8,0,Math.PI*2);X.fill();
+    X.globalAlpha=1;
+  }
+}
+
+function drawCrowd(g){
+  const startY=H*0.06,endY=H*0.38;
+  const rows=Math.floor((endY-startY)/9);
+  const cols=Math.floor(W/8);
+  const colors=['#c62828','#1565c0','#f9a825','#6a1b9a','#e65100','#fff','#00838f','#2e7d32','#ad1457','#ff6f00'];
+  // Draw crowd as colored blocks (like a real stadium)
+  for(let r=0;r<rows;r++){
+    for(let c=0;c<cols;c++){
+      const x=c*8+(r%2)*4;
+      const y=startY+r*9;
+      // Gap for goal area
+      if(y>H*0.15&&y<H*0.35&&x>g.gx-20&&x<g.gx+g.gw+20)continue;
+      const ci=(r*7+c*3)%colors.length;
+      X.fillStyle=colors[ci];
+      X.globalAlpha=0.7+Math.random()*0.3;
+      X.fillRect(x,y,6,7);
+      // Animated cheering after goal
+      if(state==='result'&&results[results.length-1]==='goal'&&Math.random()>0.7){
+        X.fillRect(x+1,y-4,2,4);// raised arm
+      }
+    }
+  }
+  X.globalAlpha=1;
+}
+
+function drawGrassStripes(g){
+  X.fillStyle='#256d28';
+  const stripeH=H*0.06;
+  for(let i=0;i<8;i+=2){
+    X.fillRect(0,H*0.38+i*stripeH,W,stripeH);
+  }
+  // Penalty spot
+  X.fillStyle='#fff';
+  X.beginPath();X.arc(g.ballX,g.ballY-40,3,0,Math.PI*2);X.fill();
+  // Penalty arc hint
+  X.strokeStyle='#ffffff15';X.lineWidth=1.5;
+  X.beginPath();X.arc(g.ballX,g.ballY-40,H*0.12,Math.PI*1.15,Math.PI*1.85);X.stroke();
+}
+
+function drawGoal(g){
+  const{gx,gy,gw,gh}=g;
+  // Net - more realistic mesh
+  X.strokeStyle='#ffffff18';X.lineWidth=0.8;
+  const netCols=20,netRows=12;
+  for(let i=0;i<=netCols;i++){
+    const x=gx+i*(gw/netCols);
+    X.beginPath();X.moveTo(x,gy);X.lineTo(x,gy+gh);X.stroke();
+  }
+  for(let i=0;i<=netRows;i++){
+    const y=gy+i*(gh/netRows);
+    X.beginPath();X.moveTo(gx,y);X.lineTo(gx+gw,y);X.stroke();
+  }
+  // Goal frame with thickness
+  const postW=Math.max(5,W*0.012);
+  // Shadow
+  X.fillStyle='rgba(0,0,0,.3)';
+  X.fillRect(gx-postW/2+3,gy+3,postW,gh);
+  X.fillRect(gx+gw-postW/2+3,gy+3,postW,gh);
+  X.fillRect(gx+3,gy-postW/2+3,gw,postW);
+  // White posts
+  X.fillStyle='#fff';
+  X.fillRect(gx-postW/2,gy,postW,gh);// left post
+  X.fillRect(gx+gw-postW/2,gy,postW,gh);// right post
+  X.fillRect(gx-postW/2,gy-postW/2,gw+postW,postW);// crossbar
+  // Post highlights (3D effect)
+  X.fillStyle='rgba(255,255,255,.3)';
+  X.fillRect(gx-postW/2,gy,postW*0.4,gh);
+  X.fillRect(gx+gw-postW/2,gy,postW*0.4,gh);
+}
+
+function drawKeeper(g){
+  const{gx,gy,gw,gh}=g;
+  const kx=gx+gw/2;
+  const ky=gy+gh*0.6;
+  const kScale=Math.min(W,H)/500;
+  // Dive animation
+  let dx=0,dy=0,angle=0,armSpread=1;
+  if(state==='fly'||state==='result'){
+    const t=Math.min(1,gkDiveT);
+    const ease=t<0.5?2*t*t:1-Math.pow(-2*t+2,2)/2;
+    dx=gkDive*gw*0.35*ease;
+    dy=-gh*0.1*Math.sin(t*Math.PI);
+    angle=gkDive*0.4*ease;
+    armSpread=1+ease*1.5;
+  }
+  X.save();X.translate(kx+dx,ky+dy);X.rotate(angle);X.scale(kScale,kScale);
+  // Shadow
+  X.fillStyle='rgba(0,0,0,.2)';X.beginPath();X.ellipse(0,42,20,6,0,0,Math.PI*2);X.fill();
+  // Legs
+  X.fillStyle='#222';X.fillRect(-12,20,10,24);X.fillRect(2,20,10,24);
+  // Body (GK jersey - bright color)
+  X.fillStyle='#f57c00';
+  X.beginPath();X.roundRect(-16,-20,32,42,6);X.fill();
+  // Jersey number
+  X.fillStyle='#fff';X.font='bold 14px sans-serif';X.textAlign='center';X.fillText('1',0,8);
+  // Arms
+  X.strokeStyle='#f57c00';X.lineWidth=6;X.lineCap='round';
+  X.beginPath();X.moveTo(-14,-8);X.lineTo(-14-18*armSpread,-20*armSpread);X.stroke();
+  X.beginPath();X.moveTo(14,-8);X.lineTo(14+18*armSpread,-20*armSpread);X.stroke();
+  // Gloves
+  X.fillStyle='#4caf50';
+  X.beginPath();X.arc(-14-18*armSpread,-20*armSpread,6,0,Math.PI*2);X.fill();
+  X.beginPath();X.arc(14+18*armSpread,-20*armSpread,6,0,Math.PI*2);X.fill();
+  // Head
+  X.fillStyle='#ffccbc';X.beginPath();X.arc(0,-30,12,0,Math.PI*2);X.fill();
+  // Hair
+  X.fillStyle='#4a2c00';X.beginPath();X.arc(0,-35,10,Math.PI,Math.PI*2);X.fill();
+  // Cap
+  X.fillStyle='#f57c00';X.beginPath();X.ellipse(0,-38,12,4,0,0,Math.PI*2);X.fill();
+  X.restore();
+}
+
+function drawBall(g){
+  let bx,by,bScale=1,rot=0;
+  if(state==='aim'){
+    bx=g.ballX;by=g.ballY;
+  }else if(state==='fly'){
+    const t=ballT;
+    const ease=t;// linear for ball
+    bx=ballStart.x+(ballEnd.x-ballStart.x)*ease;
+    by=ballStart.y+(ballEnd.y-ballStart.y)*ease-Math.sin(t*Math.PI)*H*0.12;
+    bScale=1-t*0.45;// perspective shrink
+    rot=t*8;
+  }else if(state==='result'){
+    bx=ballEnd.x;by=ballEnd.y;bScale=0.55;
+  }else return;
+  const r=Math.max(12,W*0.035)*bScale;
+  X.save();X.translate(bx,by);X.rotate(rot);
+  // Ball shadow
+  X.fillStyle='rgba(0,0,0,.2)';X.beginPath();X.ellipse(4,r*0.8,r*0.8,r*0.3,0,0,Math.PI*2);X.fill();
+  // White ball
+  X.fillStyle='#fff';X.beginPath();X.arc(0,0,r,0,Math.PI*2);X.fill();
+  // FIFA 2026 Connected ball design - angular panels in blue and red/coral
+  X.lineWidth=r*0.12;X.lineCap='round';
+  // Blue strokes
+  X.strokeStyle='#1565c0';
+  X.beginPath();X.moveTo(-r*0.5,-r*0.3);X.lineTo(r*0.1,-r*0.65);X.stroke();
+  X.beginPath();X.moveTo(r*0.3,r*0.1);X.lineTo(r*0.7,-r*0.15);X.stroke();
+  X.beginPath();X.moveTo(-r*0.2,r*0.5);X.lineTo(-r*0.6,r*0.2);X.stroke();
+  // Red/coral strokes
+  X.strokeStyle='#d84315';
+  X.beginPath();X.moveTo(-r*0.1,r*0.4);X.lineTo(r*0.4,r*0.55);X.stroke();
+  X.beginPath();X.moveTo(r*0.5,-r*0.4);X.lineTo(r*0.2,-r*0.1);X.stroke();
+  // Outline
+  X.strokeStyle='#0003';X.lineWidth=1;X.beginPath();X.arc(0,0,r,0,Math.PI*2);X.stroke();
+  // Shine
+  X.fillStyle='rgba(255,255,255,.35)';X.beginPath();X.arc(-r*0.25,-r*0.25,r*0.3,0,Math.PI*2);X.fill();
+  X.restore();
+}
+
+function drawReticle(g){
+  if(!aimPos)return;
+  const{gx,gy,gw,gh}=g;
+  const tx=gx+aimX*gw,ty=gy+aimY*gh;
+  // Dashed line from ball to target
+  X.setLineDash([6,6]);X.strokeStyle='#ffffff40';X.lineWidth=1.5;
+  X.beginPath();X.moveTo(g.ballX,g.ballY);X.lineTo(tx,ty);X.stroke();
+  X.setLineDash([]);
+  // Crosshair
+  X.strokeStyle='#fff';X.lineWidth=2;
+  const s=14;
+  X.beginPath();X.arc(tx,ty,s,0,Math.PI*2);X.stroke();
+  X.beginPath();X.moveTo(tx-s*1.4,ty);X.lineTo(tx-s*0.6,ty);X.stroke();
+  X.beginPath();X.moveTo(tx+s*0.6,ty);X.lineTo(tx+s*1.4,ty);X.stroke();
+  X.beginPath();X.moveTo(tx,ty-s*1.4);X.lineTo(tx,ty-s*0.6);X.stroke();
+  X.beginPath();X.moveTo(tx,ty+s*0.6);X.lineTo(tx,ty+s*1.4);X.stroke();
+  // Glow
+  X.fillStyle='rgba(255,255,255,.06)';X.beginPath();X.arc(tx,ty,s*2,0,Math.PI*2);X.fill();
+}
+
+// ====== INPUT ======
+let aimPos=null;
+function inputPos(e){
+  const cx=e.touches?e.touches[0].clientX:e.clientX;
+  const cy=e.touches?e.touches[0].clientY:e.clientY;
+  return{x:cx,y:cy};
+}
+function updateAim(pos){
+  const g=geo();
+  aimX=Math.max(0,Math.min(1,(pos.x-g.gx)/g.gw));
+  aimY=Math.max(0,Math.min(1,(pos.y-g.gy)/g.gh));
+  aimPos=pos;
+}
+C.addEventListener('mousemove',e=>{if(state==='aim'){updateAim(inputPos(e));render();}});
+C.addEventListener('touchmove',e=>{if(state==='aim'){e.preventDefault();updateAim(inputPos(e));render();}},{passive:false});
+C.addEventListener('click',e=>{if(state==='aim')takeShot(inputPos(e));});
+C.addEventListener('touchend',e=>{if(state==='aim'&&aimPos)takeShot(aimPos);});
+
+// ====== SHOT LOGIC ======
+function takeShot(pos){
+  const g=geo();
+  updateAim(pos);
+  document.getElementById('aim-hint').classList.add('hide');
+  // Ball target (in goal coordinates)
+  ballStart={x:g.ballX,y:g.ballY};
+  ballEnd={x:g.gx+aimX*g.gw,y:g.gy+aimY*g.gh};
+  // GK decision
+  const relX=aimX-0.5;// -0.5 to 0.5
+  const difficulty=0.45;// GK guesses right 45% of time
+  if(Math.random()<difficulty){
+    gkDive=relX>0.1?1:relX<-0.1?-1:0;
+  }else{
+    gkDive=(Math.random()-0.5)*2;// random dive
+  }
+  // Determine outcome
+  const cornerDist=Math.abs(relX);
+  const heightDist=Math.abs(aimY-0.5);
+  const gkReach=0.35+Math.random()*0.2;
+  let saved=false;
+  if(Math.abs(gkDive-relX*2)<gkReach&&heightDist<0.6){
+    saved=true;
+  }
+  // Post chance (near edges)
+  const hitPost=(cornerDist>0.42||aimY<0.05||aimY>0.92)&&Math.random()<0.15;
+  // Miss chance (if aiming way outside)
+  const missed=aimY<-0.05||aimY>1.05||aimX<-0.05||aimX>1.05;
+  // Animate
+  state='fly';ballT=0;gkDiveT=0;
+  const startTime=performance.now();
+  function animate(now){
+    const elapsed=(now-startTime)/500;
+    ballT=Math.min(1,elapsed);
+    gkDiveT=Math.min(1,elapsed*1.2);
+    render();
+    if(ballT<1){requestAnimationFrame(animate);}
+    else{resolveShot(saved,hitPost,missed);}
+  }
+  requestAnimationFrame(animate);
+}
+
+function resolveShot(saved,hitPost,missed){
+  state='result';shot++;
+  let outcome;
+  if(missed){
+    outcome='miss';showFlash('😬 MISS!','Wide of the goal',2000);
+  }else if(hitPost){
+    outcome='miss';showFlash('💥 POST!','Agonizingly close!',2000);
+  }else if(saved){
+    outcome='miss';showFlash('🧤 SAVED!','Great stop by the keeper',2000);
+  }else{
+    outcome='goal';goals++;showFlash('⚽ GOOOAL!','',2000);
+  }
+  results.push(outcome);
+  updateHUD();
+  // Next shot or end
+  setTimeout(()=>{
+    if(shot>=TOTAL){endGame();}
+    else{state='aim';aimPos=null;render();}
+  },2200);
+}
+
+// ====== UI HELPERS ======
+function showFlash(title,sub,dur){
+  const el=document.getElementById('flash');
+  document.getElementById('flash-title').textContent=title;
+  document.getElementById('flash-sub').textContent=sub;
+  el.classList.remove('hide');el.classList.add('show');
+  clearTimeout(flashTimeout);
+  flashTimeout=setTimeout(()=>{el.classList.remove('show');el.classList.add('hide');},dur);
+}
+
+function updateHUD(){
+  document.getElementById('hud-shots').textContent=`SHOT ${Math.min(shot+1,TOTAL)} OF ${TOTAL}`;
+  document.getElementById('hud-score').textContent=goals;
+  document.getElementById('hud-best').textContent=getBest();
+  // Dots
+  let dots='';
+  for(let i=0;i<TOTAL;i++){
+    let cls='dot';
+    if(i<results.length)cls+=' '+(results[i]==='goal'?'goal':'miss');
+    else if(i===results.length)cls+=' current';
+    dots+=`<div class="${cls}"></div>`;
+  }
+  document.getElementById('dots').innerHTML=dots;
+}
+
+function getBest(){return parseInt(localStorage.getItem('pk_best')||'0');}
+function getGames(){return parseInt(localStorage.getItem('pk_games')||'0');}
+function getTotalGoals(){return parseInt(localStorage.getItem('pk_goals')||'0');}
+
+function endGame(){
+  state='done';
+  const best=getBest();const newBest=goals>best;
+  if(newBest)localStorage.setItem('pk_best',goals);
+  localStorage.setItem('pk_games',getGames()+1);
+  localStorage.setItem('pk_goals',getTotalGoals()+goals);
+  const emoji=goals>=5?'🏆':goals>=4?'🌟':goals>=3?'👏':goals>=2?'😐':'😬';
+  const titles=['Ouch...','Needs Practice','Decent','Clinical!','Superb!','PERFECT! 🎉'];
+  document.getElementById('end-emoji').textContent=emoji;
+  document.getElementById('end-title').textContent=titles[goals]||'';
+  document.getElementById('end-result').textContent=`${goals} / ${TOTAL} Goals`;
+  document.getElementById('end-stats').innerHTML=
+    `${newBest?'🎉 NEW BEST! · ':''}Best: <span>${Math.max(best,goals)}</span> · Games: <span>${getGames()}</span> · Career goals: <span>${getTotalGoals()}</span>`;
+  document.getElementById('endscreen').classList.add('show');
+}
+
+function startGame(){
+  shot=0;goals=0;results=[];state='aim';aimPos=null;gkDive=0;gkDiveT=0;
+  document.getElementById('endscreen').classList.remove('show');
+  document.getElementById('aim-hint').classList.remove('hide');
+  updateHUD();render();
+}
+
+// ====== INIT ======
+startGame();
+</script>
+</body>
+</html>
